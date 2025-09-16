@@ -47,22 +47,101 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 
 /// <--- your code here --->
 
-/*
-    // OPTIONAL: Uncomment this block to include your CPU vector implementation
-    // from Lab 1 for easy comparison.
-    //
-    // (If you do this, you'll need to update your code to use the new constants
-    // 'window_zoom', 'window_x', and 'window_y'.)
 
-    #define HAS_VECTOR_IMPL // <~~ keep this line if you want to benchmark the vector kernel!
+// OPTIONAL: Uncomment this block to include your CPU vector implementation
+// from Lab 1 for easy comparison.
+//
+// (If you do this, you'll need to update your code to use the new constants
+// 'window_zoom', 'window_x', and 'window_y'.)
 
-    ////////////////////////////////////////////////////////////////////////////////
-    // Vector
+#define HAS_VECTOR_IMPL // <~~ keep this line if you want to benchmark the vector kernel!
 
-    void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-        // your code here...
+////////////////////////////////////////////////////////////////////////////////
+// Vector
+
+void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
+    // First version: just iterates over blocks of 16 pixels at a time using SIMD for them
+
+    // 16 32bit ints/floats in an AVX-512 vector
+    uint32_t vector_size = img_size / 16;
+
+    // Vector constants
+    __m512 _4p0_vector = _mm512_set1_ps(4.0f);
+    __m512 _1_vector = _mm512_set1_epi32(1);
+    __m512 max_iters_vector = _mm512_set1_epi32(max_iters);
+
+    // Comparison operator values
+    const int lt = 1;
+    const int leq = 2;
+
+    for (uint64_t i = 0; i < img_size; ++i) {
+        // Get the plane coordinate cy for the image pixel.
+        __m512 cy_vector = _mm512_set1_ps((float(i) / float(img_size)) * window_zoom + window_y);
+        for (uint64_t j = 0; j < vector_size; ++j) {
+            // Get the plane coordinate cx for the image pixel.
+            __m512 cx_vector = _mm512_set_ps(
+                (float(j * 16 + 15) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 14) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 13) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 12) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 11) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 10) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 9) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 8) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 7) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 6) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 5) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 4) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 3) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 2) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 1) / float(img_size)) * window_zoom + window_x,
+                (float(j * 16 + 0) / float(img_size)) * window_zoom + window_x
+            );
+
+            // Innermost loop: start the recursion from z = 0.
+            __m512 x2_vector = _mm512_set1_ps(0.0f);
+            __m512 y2_vector = _mm512_set1_ps(0.0f);
+            __m512 w_vector = _mm512_set1_ps(0.0f);
+            __m512i iters_vector = _mm512_set1_epi32(0);
+
+            // While condition mask is a 16bit int where each bit is the boolean for each vector, so finished the computation when equals 0
+            // x2 + y2 <= 4.0 while condition
+            __m512 x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
+            __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, leq);
+            // iters < max_iters while condition
+            __mmask16 iters_cmp_mask = _mm512_cmp_ps_mask(iters_vector, max_iters_vector, lt);
+            // Overall mask
+            __mmask16 while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
+            
+            while (while_condition_mask > 0) {
+                // Update x2, y2, and w for all vectors
+                __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(x2_vector, y2_vector), cx_vector);
+                __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(_mm512_sub_ps(w_vector, x2_vector), y2_vector), cy_vector);
+                // This reordering is 0.2ms faster but causes some error due to reordering of floating point ops (only pos bc cpu doesnt use -ffast-math)
+                // __m512 ya_vector = _mm512_add_ps(w_vector, cy_vector);
+                // __m512 yb_vector = _mm512_add_ps(x2_vector, y2_vector);
+                // __m512 y_vector = _mm512_sub_ps(ya_vector, yb_vector);
+                x2_vector = _mm512_mul_ps(x_vector, x_vector);
+                y2_vector = _mm512_mul_ps(y_vector, y_vector);
+                __m512 z_vector = _mm512_add_ps(x_vector, y_vector);
+                w_vector = _mm512_mul_ps(z_vector, z_vector);
+
+                // Only update iters for the vectors that are not done yet
+                iters_vector = _mm512_mask_add_epi32(iters_vector, while_condition_mask, iters_vector, _1_vector);
+
+                // Update the while mask
+                x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
+                x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, leq);
+                iters_cmp_mask = _mm512_cmp_ps_mask(iters_vector, max_iters_vector, lt);
+                while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
+            }
+
+            // Write result.
+            uint32_t *mem_addr = out + i * img_size + j * 16;
+            _mm512_storeu_si512(mem_addr, iters_vector);
+        }
     }
-*/
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + ILP

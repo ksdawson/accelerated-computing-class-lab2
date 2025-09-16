@@ -32,6 +32,26 @@ fma_latency(data_type *n, unsigned long long *d_start, unsigned long long *d_end
     start_time = clock_cycle();
 
     /// <--- /your code here --->
+    x += x * x; // 1 op
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x; // 5 ops
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x; // 10 ops
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x; // 20 ops
 
     end_time = clock_cycle();
 
@@ -58,6 +78,46 @@ __global__ void fma_latency_interleaved(
     start_time = clock_cycle();
 
     /// <--- /your code here --->
+    x += x * x;
+    y += y * y; // 1 op
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y; // 5 ops
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y; // 10 ops
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y;
+    x += x * x;
+    y += y * y; // 20 ops
 
     end_time = clock_cycle();
 
@@ -85,6 +145,46 @@ __global__ void fma_latency_no_interleave(
     start_time = clock_cycle();
 
     /// <--- /your code here --->
+    x += x * x; // 1 op
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x; // 5 ops
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x; // 10 ops
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x;
+    x += x * x; // 20 ops
+    y += y * y; // 1 op
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y; // 5 ops
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y; // 10 ops
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y;
+    y += y * y; // 20 ops
 
     end_time = clock_cycle();
 
