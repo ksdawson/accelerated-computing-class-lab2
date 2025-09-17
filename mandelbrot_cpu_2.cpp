@@ -80,10 +80,6 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
     __m512i _1_vector = _mm512_set1_epi32(1);
     __m512i max_iters_vector = _mm512_set1_epi32(max_iters);
 
-    // Comparison operator values
-    const int lt = 1;
-    const int leq = 2;
-
     for (uint64_t i = 0; i < img_size; ++i) {
         // Get the plane coordinate cy for the image pixel.
         __m512 cy_vector = _mm512_set1_ps((float(i) / float(img_size)) * window_zoom + window_y);
@@ -115,22 +111,14 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
             __m512i iters_vector = _mm512_set1_epi32(0);
 
             // While condition mask is a 16bit int where each bit is the boolean for each vector, so finished the computation when equals 0
-            // x2 + y2 <= 4.0 while condition
-            __m512 x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
-            __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, leq);
-            // iters < max_iters while condition
-            __mmask16 iters_cmp_mask = _mm512_cmp_epi32_mask(iters_vector, max_iters_vector, lt);
-            // Overall mask
-            __mmask16 while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
+            // Condition: x2 + y2 <= 4.0 and iters < max_iters
+            __mmask16 while_condition_mask = 65535; // All vector lanes are true
             
             while (while_condition_mask > 0) {
                 // Update x2, y2, and w for all vectors
+                __m512 x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
                 __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(x2_vector, y2_vector), cx_vector);
-                __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(_mm512_sub_ps(w_vector, x2_vector), y2_vector), cy_vector);
-                // This reordering is 0.2ms faster but causes some error due to reordering of floating point ops (only pos bc cpu doesnt use -ffast-math)
-                // __m512 ya_vector = _mm512_add_ps(w_vector, cy_vector);
-                // __m512 yb_vector = _mm512_add_ps(x2_vector, y2_vector);
-                // __m512 y_vector = _mm512_sub_ps(ya_vector, yb_vector);
+                __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(w_vector, x2_plus_y2_vector), cy_vector);
                 x2_vector = _mm512_mul_ps(x_vector, x_vector);
                 y2_vector = _mm512_mul_ps(y_vector, y_vector);
                 __m512 z_vector = _mm512_add_ps(x_vector, y_vector);
@@ -140,9 +128,8 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
                 iters_vector = _mm512_mask_add_epi32(iters_vector, while_condition_mask, iters_vector, _1_vector);
 
                 // Update the while mask
-                x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
-                x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, leq);
-                iters_cmp_mask = _mm512_cmp_epi32_mask(iters_vector, max_iters_vector, lt);
+                __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, _MM_CMPINT_LE);
+                __mmask16 iters_cmp_mask = _mm512_cmp_epi32_mask(iters_vector, max_iters_vector, _MM_CMPINT_LT);
                 while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
             }
 
@@ -215,6 +202,7 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
     // In general define blocks then do vectors within that.
     // Parameters to set: is_vector_row, vector_rows, vector_cols
     // Fastest so far: (true, 16, 2, 29.5ms), (false, 1, 16, 28.5ms), (false, 2, 8, 28.5ms)
+    // IDEA: change vector size from 16 row/col to 4x4 or 8x2
 
     // Vector constants
     __m512 _4p0_vector = _mm512_set1_ps(4.0f);
@@ -287,8 +275,8 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
                     }
 
                     // Update x2, y2, and w for all pixels in the vector
-                    __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(vector.x2_vector, vector.y2_vector), vector.cx_vector);
                     __m512 x2_plus_y2_vector = _mm512_add_ps(vector.x2_vector, vector.y2_vector);
+                    __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(vector.x2_vector, vector.y2_vector), vector.cx_vector);
                     __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(vector.w_vector, x2_plus_y2_vector), vector.cy_vector);
                     vector.x2_vector = _mm512_mul_ps(x_vector, x_vector);
                     vector.y2_vector = _mm512_mul_ps(y_vector, y_vector);

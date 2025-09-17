@@ -51,7 +51,7 @@ __global__ void mandelbrot_gpu_vector(
             uint32_t iters = 0;
             while (x2 + y2 <= 4.0f && iters < max_iters) {
                 float x = x2 - y2 + cx;
-                float y = w - x2 - y2 + cy;
+                float y = w - (x2 + y2) + cy;
                 x2 = x * x;
                 y2 = y * y;
                 float z = x + y;
