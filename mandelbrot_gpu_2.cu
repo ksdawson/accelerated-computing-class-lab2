@@ -104,42 +104,43 @@ __global__ void mandelbrot_gpu_vector_ilp(
         for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
             // Iterate over vectors in the block, interleaving the vectors to unlock ILP
             #pragma unroll
-            for (uint64_t vector_i = 0; vector_i < vector_rows; ++vector_i) {
-                #pragma unroll
-                for (uint64_t vector_j = 0; vector_j < vector_cols; ++vector_j) {
-                    // The starting pixel of the vector
-                    uint64_t pixel_i = block_i * block_row_size + vector_i * vector_row_size;
-                    uint64_t pixel_j = block_j * block_col_size + vector_j * vector_col_size;
-                    
-                    // Get the specific pixel in the vector for this thread
-                    if (is_vector_row) {
-                        pixel_j += threadIdx.x;
-                    } else {
-                        pixel_i += threadIdx.x;
-                    }
+            for (uint64_t v = 0; v < vectors_per_block; ++v) {
+                // Get the vector_i, vector_j coordinates in the block
+                uint64_t vector_i = v / vector_cols;
+                uint64_t vector_j = v % vector_cols;
 
-                    // Get the plane coordinate for the image pixel.
-                    float cy = (float(pixel_i) / float(img_size)) * window_zoom + window_y;
-                    float cx = (float(pixel_j) / float(img_size)) * window_zoom + window_x;
+                // The starting pixel of the vector
+                uint64_t pixel_i = block_i * block_row_size + vector_i * vector_row_size;
+                uint64_t pixel_j = block_j * block_col_size + vector_j * vector_col_size;
 
-                    // Innermost loop: start the recursion from z = 0.
-                    float x2 = 0.0f;
-                    float y2 = 0.0f;
-                    float w = 0.0f;
-                    uint32_t iters = 0;
-                    while (x2 + y2 <= 4.0f && iters < max_iters) {
-                        float x = x2 - y2 + cx;
-                        float y = w - (x2 + y2) + cy;
-                        x2 = x * x;
-                        y2 = y * y;
-                        float z = x + y;
-                        w = z * z;
-                        ++iters;
-                    }
-
-                    // Write result.
-                    out[pixel_i * img_size + pixel_j] = iters;
+                // Get the specific pixel in the vector for this thread
+                if (is_vector_row) {
+                    pixel_j += threadIdx.x;
+                } else {
+                    pixel_i += threadIdx.x;
                 }
+
+                // Get the plane coordinate for the image pixel.
+                float cy = (float(pixel_i) / float(img_size)) * window_zoom + window_y;
+                float cx = (float(pixel_j) / float(img_size)) * window_zoom + window_x;
+
+                // Innermost loop: start the recursion from z = 0.
+                float x2 = 0.0f;
+                float y2 = 0.0f;
+                float w = 0.0f;
+                uint32_t iters = 0;
+                while (x2 + y2 <= 4.0f && iters < max_iters) {
+                    float x = x2 - y2 + cx;
+                    float y = w - (x2 + y2) + cy;
+                    x2 = x * x;
+                    y2 = y * y;
+                    float z = x + y;
+                    w = z * z;
+                    ++iters;
+                }
+
+                // Write result.
+                out[pixel_i * img_size + pixel_j] = iters;
             }
         }
     }
