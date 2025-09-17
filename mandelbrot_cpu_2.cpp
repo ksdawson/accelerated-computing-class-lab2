@@ -236,6 +236,8 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
     // Vector block dimensions
     uint64_t block_row_size = vector_rows * vector_row_size;
     uint64_t block_col_size = vector_cols * vector_col_size;
+    uint64_t block_rows = img_size / block_row_size;
+    uint64_t block_cols = img_size / block_col_size;
 
     // We represent each pixel vector as a struct of all its relevant vectors
     struct PixelVector {
@@ -249,8 +251,8 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
     };
     PixelVector vector_block[vectors_per_block];
 
-    for (uint64_t block_i = 0; block_i < img_size / block_row_size; ++block_i) {
-        for (uint64_t block_j = 0; block_j < img_size / block_col_size; ++block_j) {
+    for (uint64_t block_i = 0; block_i < block_rows; ++block_i) {
+        for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
             // Initialize our block of vectors
             for (uint64_t vector_i = 0; vector_i < vector_rows; ++vector_i) {
                 for (uint64_t vector_j = 0; vector_j < vector_cols; ++vector_j) {
@@ -272,7 +274,6 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
 
             // Inner loop math
             bool while_condition = true;
-            uint64_t iters = 0;
             while (while_condition) {
                 // Do for each vector in our block
                 while_condition = false;
@@ -281,7 +282,7 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
                     auto &vector = vector_block[k];
                     // Skip vector if it's already done
                     if (vector.while_condition_mask == 0) {
-                        // We lose some ILP here when we finish some vectors early
+                        // Do we lose some ILP here when we finish some vectors early?
                         continue;
                     }
 
