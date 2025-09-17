@@ -8,17 +8,6 @@
 #include <cstdint>
 #include <immintrin.h>
 #include <pthread.h>
-#include <algorithm>
-#include <chrono>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
-#include <sys/types.h>
-#include <vector>
 
 constexpr float window_zoom = 1.0 / 10000.0f;
 constexpr float window_x = -0.743643887 - 0.5 * window_zoom;
@@ -348,6 +337,18 @@ void mandelbrot_cpu_vector_multicore_multithread_ilp(
 ////////////////////////////////////////////////////////////////////////////////
 ///          YOU DO NOT NEED TO MODIFY THE CODE BELOW HERE.                  ///
 ////////////////////////////////////////////////////////////////////////////////
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <sys/types.h>
+#include <vector>
 
 // Useful functions and structures.
 enum MandelbrotImpl {
