@@ -8,6 +8,17 @@
 #include <cstdint>
 #include <immintrin.h>
 #include <pthread.h>
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <sys/types.h>
+#include <vector>
 
 constexpr float window_zoom = 1.0 / 10000.0f;
 constexpr float window_x = -0.743643887 - 0.5 * window_zoom;
@@ -47,7 +58,6 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 
 /// <--- your code here --->
 
-
 // OPTIONAL: Uncomment this block to include your CPU vector implementation
 // from Lab 1 for easy comparison.
 //
@@ -67,8 +77,8 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
 
     // Vector constants
     __m512 _4p0_vector = _mm512_set1_ps(4.0f);
-    __m512 _1_vector = _mm512_set1_epi32(1);
-    __m512 max_iters_vector = _mm512_set1_epi32(max_iters);
+    __m512i _1_vector = _mm512_set1_epi32(1);
+    __m512i max_iters_vector = _mm512_set1_epi32(max_iters);
 
     // Comparison operator values
     const int lt = 1;
@@ -109,7 +119,7 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
             __m512 x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
             __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, leq);
             // iters < max_iters while condition
-            __mmask16 iters_cmp_mask = _mm512_cmp_ps_mask(iters_vector, max_iters_vector, lt);
+            __mmask16 iters_cmp_mask = _mm512_cmp_epi32_mask(iters_vector, max_iters_vector, lt);
             // Overall mask
             __mmask16 while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
             
@@ -132,7 +142,7 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
                 // Update the while mask
                 x2_plus_y2_vector = _mm512_add_ps(x2_vector, y2_vector);
                 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, leq);
-                iters_cmp_mask = _mm512_cmp_ps_mask(iters_vector, max_iters_vector, lt);
+                iters_cmp_mask = _mm512_cmp_epi32_mask(iters_vector, max_iters_vector, lt);
                 while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
             }
 
@@ -146,8 +156,172 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + ILP
 
+void set_coordinate_vector(__m512 *vector, bool is_vector_row, bool is_cy, uint64_t pixel_i, uint64_t pixel_j, uint32_t img_size) {
+    // Determine what type of vector this is
+    bool is_constant_vector = is_vector_row == is_cy;
+    // Determine pixel params
+    float window = is_cy ? window_y : window_x;
+    uint64_t pixel_idx = is_cy ? pixel_i : pixel_j;
+    // Set the vector
+    if (is_constant_vector) {
+        *vector = _mm512_set1_ps((float(pixel_idx) / float(img_size)) * window_zoom + window);
+    } else {
+        *vector = _mm512_set_ps(
+            (float(pixel_idx + 15) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 14) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 13) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 12) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 11) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 10) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 9) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 8) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 7) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 6) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 5) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 4) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 3) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 2) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 1) / float(img_size)) * window_zoom + window,
+            (float(pixel_idx + 0) / float(img_size)) * window_zoom + window
+        );
+    }
+}
+
+void write_row_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size) {
+    uint32_t *mem_addr = out + i * img_size + j;
+    _mm512_storeu_si512(mem_addr, vector);
+}
+
+void write_col_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size, __m512i vindex) {
+    // Scalar memory write
+    // uint64_t base = i * (uint64_t)img_size + j;
+    // alignas(64) uint32_t tmp[16];
+    // // Store vector lanes to tmp in lane order: tmp[0] is lane0, tmp[15] is lane15
+    // _mm512_storeu_si512((__m512i*)tmp, vector);
+    // for (int k = 0; k < 16; ++k) {
+    //     out[base + (uint64_t)k * img_size] = tmp[k];
+    // }
+
+    // Vector memory write
+    uint32_t *mem_addr = out + i * img_size + j;
+    _mm512_i32scatter_epi32(mem_addr, vindex, vector, 4);
+}
+
 void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    // TODO: Implement this function.
+    // Currently we work on one vector of pixels at a time.
+    // Vector contains 16 adjacent pixels.
+    // Now we want to work on multiple vectors at a time.
+    // We should work on 16x16 blocks.
+    // In general define blocks then do vectors within that.
+    // Parameters to set: is_vector_row, vector_rows, vector_cols
+    // Fastest so far: (true, 16, 2, 29.5ms), (false, 1, 16, 28.5ms), (false, 2, 8, 28.5ms)
+
+    // Vector constants
+    __m512 _4p0_vector = _mm512_set1_ps(4.0f);
+    __m512i _1_vector = _mm512_set1_epi32(1);
+    __m512i max_iters_vector = _mm512_set1_epi32(max_iters);
+    __m512i vindex = _mm512_set_epi32(15*img_size, 14*img_size, 13*img_size, 12*img_size, 11*img_size, 10*img_size, 9*img_size, 8*img_size, 7*img_size, 6*img_size, 5*img_size, 4*img_size, 3*img_size, 2*img_size, 1*img_size, 0*img_size);
+
+    // Type of vector
+    uint8_t vector_size = 16; // 16 32bit ints/floats in an AVX-512 vector
+    bool is_vector_row = false; // true for row, false for col
+
+    // Vector dimensions
+    uint8_t vector_row_size = is_vector_row ? 1 : vector_size;
+    uint8_t vector_col_size = is_vector_row ? vector_size : 1;
+    uint8_t vector_rows = 1;
+    uint8_t vector_cols = 16;
+    constexpr uint8_t vectors_per_block = 1 * 16; // vector_rows * vector_cols
+
+    // Vector block dimensions
+    uint64_t block_row_size = vector_rows * vector_row_size;
+    uint64_t block_col_size = vector_cols * vector_col_size;
+
+    // We represent each pixel vector as a struct of all its relevant vectors
+    struct PixelVector {
+        __m512 cy_vector;
+        __m512 cx_vector;
+        __m512 x2_vector;
+        __m512 y2_vector;
+        __m512 w_vector;
+        __m512i iters_vector;
+        __mmask16 while_condition_mask;
+    };
+    PixelVector vector_block[vectors_per_block];
+
+    for (uint64_t block_i = 0; block_i < img_size / block_row_size; ++block_i) {
+        for (uint64_t block_j = 0; block_j < img_size / block_col_size; ++block_j) {
+            // Initialize our block of vectors
+            for (uint64_t vector_i = 0; vector_i < vector_rows; ++vector_i) {
+                for (uint64_t vector_j = 0; vector_j < vector_cols; ++vector_j) {
+                    // Create pixel vector
+                    auto &vector = vector_block[vector_i * vector_cols + vector_j];
+                    // Set the coordinate vectors
+                    uint64_t pixel_i = block_i * block_row_size + vector_i * vector_row_size;
+                    uint64_t pixel_j = block_j * block_col_size + vector_j * vector_col_size;
+                    set_coordinate_vector(&(vector.cy_vector), is_vector_row, true, pixel_i, pixel_j, img_size);
+                    set_coordinate_vector(&(vector.cx_vector), is_vector_row, false, pixel_i, pixel_j, img_size);
+                    // Set iteration vectors
+                    vector.x2_vector = _mm512_set1_ps(0.0f);
+                    vector.y2_vector = _mm512_set1_ps(0.0f);
+                    vector.w_vector = _mm512_set1_ps(0.0f);
+                    vector.iters_vector = _mm512_set1_epi32(0);
+                    vector.while_condition_mask = 65535; // All vector lanes are true
+                }
+            }
+
+            // Inner loop math
+            bool while_condition = true;
+            uint64_t iters = 0;
+            while (while_condition) {
+                // Do for each vector in our block
+                while_condition = false;
+                #pragma unroll
+                for (uint64_t k = 0; k < vectors_per_block; ++k) {
+                    auto &vector = vector_block[k];
+                    // Skip vector if it's already done
+                    if (vector.while_condition_mask == 0) {
+                        // We lose some ILP here when we finish some vectors early
+                        continue;
+                    }
+
+                    // Update x2, y2, and w for all pixels in the vector
+                    __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(vector.x2_vector, vector.y2_vector), vector.cx_vector);
+                    __m512 x2_plus_y2_vector = _mm512_add_ps(vector.x2_vector, vector.y2_vector);
+                    __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(vector.w_vector, x2_plus_y2_vector), vector.cy_vector);
+                    vector.x2_vector = _mm512_mul_ps(x_vector, x_vector);
+                    vector.y2_vector = _mm512_mul_ps(y_vector, y_vector);
+                    __m512 z_vector = _mm512_add_ps(x_vector, y_vector);
+                    vector.w_vector = _mm512_mul_ps(z_vector, z_vector);
+
+                    // Only update iters for the pixels that are not done yet
+                    vector.iters_vector = _mm512_mask_add_epi32(vector.iters_vector, vector.while_condition_mask, vector.iters_vector, _1_vector);
+
+                    // Update the vector while mask
+                    __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2_plus_y2_vector, _4p0_vector, _MM_CMPINT_LE);
+                    __mmask16 iters_cmp_mask = _mm512_cmp_epi32_mask(vector.iters_vector, max_iters_vector, _MM_CMPINT_LT);
+                    vector.while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
+
+                    // Update block while condition
+                    while_condition = while_condition || (vector.while_condition_mask > 0);
+                }
+            }
+
+            // Write results
+            for (uint64_t vector_i = 0; vector_i < vector_rows; ++vector_i) {
+                for (uint64_t vector_j = 0; vector_j < vector_cols; ++vector_j) {
+                    auto &vector = vector_block[vector_i * vector_cols + vector_j];
+                    uint64_t pixel_i = block_i * block_row_size + vector_i * vector_row_size;
+                    uint64_t pixel_j = block_j * block_col_size + vector_j * vector_col_size;
+                    if (is_vector_row) {
+                        write_row_vector_to_memory(out, vector.iters_vector, pixel_i, pixel_j, img_size);
+                    } else {
+                        write_col_vector_to_memory(out, vector.iters_vector, pixel_i, pixel_j, img_size, vindex);
+                    }
+                }
+            }
+        }
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -185,18 +359,6 @@ void mandelbrot_cpu_vector_multicore_multithread_ilp(
 ////////////////////////////////////////////////////////////////////////////////
 ///          YOU DO NOT NEED TO MODIFY THE CODE BELOW HERE.                  ///
 ////////////////////////////////////////////////////////////////////////////////
-
-#include <algorithm>
-#include <chrono>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <sstream>
-#include <sys/types.h>
-#include <vector>
 
 // Useful functions and structures.
 enum MandelbrotImpl {
