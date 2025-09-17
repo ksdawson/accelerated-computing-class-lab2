@@ -89,9 +89,9 @@ __global__ void mandelbrot_gpu_vector_ilp(
     // Vector dimensions
     uint8_t vector_row_size = is_vector_row ? 1 : vector_size;
     uint8_t vector_col_size = is_vector_row ? vector_size : 1;
-    uint8_t vector_rows = 32;
+    uint8_t vector_rows = 4;
     uint8_t vector_cols = 1;
-    constexpr uint8_t vectors_per_block = 32 * 1; // vector_rows * vector_cols
+    constexpr uint8_t vectors_per_block = 4 * 1; // vector_rows * vector_cols
 
     // Vector block dimensions
     uint64_t block_row_size = vector_rows * vector_row_size;
@@ -99,48 +99,82 @@ __global__ void mandelbrot_gpu_vector_ilp(
     uint64_t block_rows = img_size / block_row_size;
     uint64_t block_cols = img_size / block_col_size;
 
+    // Get the specific pixel in the vector for this thread
+    uint8_t vector_pixel_i = 0;
+    uint8_t vector_pixel_j = 0;
+    if (is_vector_row) {
+        vector_pixel_j = threadIdx.x;
+    } else {
+        vector_pixel_i = threadIdx.x;
+    }
+
     // Iterate over blocks of vectors
     for (uint64_t block_i = 0; block_i < block_rows; ++block_i) {
         for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
-            // Iterate over vectors in the block, interleaving the vectors to unlock ILP
-            #pragma unroll
+            // The starting pixel of the block
+            uint64_t block_pixel_i = block_i * block_row_size;
+            uint64_t block_pixel_j = block_j * block_col_size;
+
+            // Initialize vector state
+            float x2[vectors_per_block] = {0.0f};
+            float y2[vectors_per_block] = {0.0f};
+            float w[vectors_per_block] = {0.0f};
+            uint32_t iters[vectors_per_block] = {0};
+            bool done[vectors_per_block] = {false};
+
+            // Precompute the plane coordinate for the image pixel.
+            float cx[vectors_per_block];
+            float cy[vectors_per_block];
             for (uint64_t v = 0; v < vectors_per_block; ++v) {
                 // Get the vector_i, vector_j coordinates in the block
                 uint64_t vector_i = v / vector_cols;
                 uint64_t vector_j = v % vector_cols;
-
                 // The starting pixel of the vector
-                uint64_t pixel_i = block_i * block_row_size + vector_i * vector_row_size;
-                uint64_t pixel_j = block_j * block_col_size + vector_j * vector_col_size;
+                uint64_t pixel_i = block_pixel_i + vector_i * vector_row_size + vector_pixel_i;
+                uint64_t pixel_j = block_pixel_j + vector_j * vector_col_size + vector_pixel_j;
+                // Set the plane coordinates
+                cy[v] = (float(pixel_i) / float(img_size)) * window_zoom + window_y;
+                cx[v] = (float(pixel_j) / float(img_size)) * window_zoom + window_x;
+            }
 
-                // Get the specific pixel in the vector for this thread
-                if (is_vector_row) {
-                    pixel_j += threadIdx.x;
-                } else {
-                    pixel_i += threadIdx.x;
-                }
-
-                // Get the plane coordinate for the image pixel.
-                float cy = (float(pixel_i) / float(img_size)) * window_zoom + window_y;
-                float cx = (float(pixel_j) / float(img_size)) * window_zoom + window_x;
-
-                // Innermost loop: start the recursion from z = 0.
-                float x2 = 0.0f;
-                float y2 = 0.0f;
-                float w = 0.0f;
-                uint32_t iters = 0;
-                while (x2 + y2 <= 4.0f && iters < max_iters) {
-                    float x = x2 - y2 + cx;
-                    float y = w - (x2 + y2) + cy;
-                    x2 = x * x;
-                    y2 = y * y;
+            // Innermost loop: start the recursion from z = 0.
+            bool while_condition = true;
+            uint32_t tot_iters = 0;
+            while (while_condition && tot_iters < max_iters) {
+                // Reset while condition
+                while_condition = false;
+                // Iterate over vectors in the block, interleaving the vectors to unlock ILP
+                #pragma unroll
+                for (uint64_t v = 0; v < vectors_per_block; ++v) {
+                    // Inner loop math
+                    float x = x2[v] - y2[v] + cx[v];
+                    float y = w[v] - (x2[v] + y2[v]) + cy[v];
+                    x2[v] = x * x;
+                    y2[v] = y * y;
                     float z = x + y;
-                    w = z * z;
-                    ++iters;
-                }
+                    w[v] = z * z;
+                    
+                    // Update vector while condition
+                    bool condition =  (x2[v] + y2[v] <= 4.0f);
+                    done[v] = done[v] || condition;
+                    iters[v] += done[v] ? 1 : 0;
 
-                // Write result.
-                out[pixel_i * img_size + pixel_j] = iters;
+                    // Update while condition
+                    while_condition = while_condition || condition;
+                }
+                ++tot_iters;
+            }
+
+            // Write result for all vectors
+            for (uint64_t v = 0; v < vectors_per_block; ++v) {
+                // Get the vector_i, vector_j coordinates in the block
+                uint64_t vector_i = v / vector_cols;
+                uint64_t vector_j = v % vector_cols;
+                // The starting pixel of the vector
+                uint64_t pixel_i = block_pixel_i + vector_i * vector_row_size + vector_pixel_i;
+                uint64_t pixel_j = block_pixel_j + vector_j * vector_col_size + vector_pixel_j;
+                // Write result
+                out[pixel_i * img_size + pixel_j] = iters[v];
             }
         }
     }
