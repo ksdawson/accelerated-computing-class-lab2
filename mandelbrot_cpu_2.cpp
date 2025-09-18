@@ -185,13 +185,8 @@ void write_col_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint6
 }
 
 void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    // Currently we work on one vector of pixels at a time.
-    // Vector contains 16 adjacent pixels.
-    // Now we want to work on multiple vectors at a time.
-    // We should work on 16x16 blocks.
-    // In general define blocks then do vectors within that.
     // Parameters to set: is_vector_row, vector_rows, vector_cols
-    // Fastest so far: (true, 16, 2, 29.5ms), (false, 1, 16, 28.5ms), (false, 2, 8, 28.5ms)
+    // Fastest so far: (true, 16, 1, 28ms)
     // IDEA: change vector size from 16 row/col to 4x4 or 8x2
 
     // Vector constants
@@ -202,14 +197,14 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
 
     // Type of vector
     uint8_t vector_size = 16; // 16 32bit ints/floats in an AVX-512 vector
-    bool is_vector_row = false; // true for row, false for col
+    bool is_vector_row = true; // true for row, false for col
 
     // Vector dimensions
     uint8_t vector_row_size = is_vector_row ? 1 : vector_size;
     uint8_t vector_col_size = is_vector_row ? vector_size : 1;
-    uint8_t vector_rows = 1;
-    uint8_t vector_cols = 16;
-    constexpr uint8_t vectors_per_block = 1 * 16; // vector_rows * vector_cols
+    uint8_t vector_rows = 16;
+    uint8_t vector_cols = 1;
+    constexpr uint8_t vectors_per_block = 16 * 1; // vector_rows * vector_cols
 
     // Vector block dimensions
     uint64_t block_row_size = vector_rows * vector_row_size;
