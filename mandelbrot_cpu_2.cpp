@@ -14,6 +14,39 @@ constexpr float window_x = -0.743643887 - 0.5 * window_zoom;
 constexpr float window_y = 0.131825904 - 0.5 * window_zoom;
 constexpr uint32_t default_max_iters = 2000;
 
+// Vindexes for writing to memory
+__m512i _1b16_vindex = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0); // add img_size 0 to 0
+__m512i _2b8_vindex = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2, 1, 0); // add img_size 0 to 1
+__m512i _4b4_vindex = _mm512_set_epi32(3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0); // add img_size 0 to 3
+__m512i _8b2_vindex = _mm512_set_epi32(1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0); // add img_size 0 to 7
+__m512i _16b1_vindex = _mm512_set1_epi32(0); // add img_size 0 to 15
+
+// Helper functions
+void write_row_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size) {
+    uint32_t *mem_addr = out + i * img_size + j;
+    _mm512_storeu_si512(mem_addr, vector);
+}
+
+void write_col_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size, __m512i vindex) {
+    // Scalar memory write
+    // uint64_t base = i * (uint64_t)img_size + j;
+    // alignas(64) uint32_t tmp[16];
+    // // Store vector lanes to tmp in lane order: tmp[0] is lane0, tmp[15] is lane15
+    // _mm512_storeu_si512((__m512i*)tmp, vector);
+    // for (int k = 0; k < 16; ++k) {
+    //     out[base + (uint64_t)k * img_size] = tmp[k];
+    // }
+
+    // Vector memory write
+    uint32_t *mem_addr = out + i * img_size + j;
+    _mm512_i32scatter_epi32(mem_addr, vindex, vector, 4);
+}
+
+void write_tile_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size, __m512i vindex) {
+    uint32_t *mem_addr = out + i * img_size + j;
+    _mm512_i32scatter_epi32(mem_addr, vindex, vector, 4);
+}
+
 // CPU Scalar Mandelbrot set generation.
 // Based on the "optimized escape time algorithm" in
 // https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set
@@ -59,41 +92,61 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 // Vector
 
 void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    // First version: just iterates over blocks of 16 pixels at a time using SIMD for them
+    // Vector dimensions: 16x1, 8x2, 4x4, 2x4, 1x16
+    constexpr uint8_t vector_size = 16; // 16 32bit ints/floats in an AVX-512 vector
+    uint8_t vector_width = 4;
+    uint8_t vector_height = 4;
 
-    // 16 32bit ints/floats in an AVX-512 vector
-    uint32_t vector_size = img_size / 16;
+    // Iteration dimensions
+    uint32_t rows = img_size / vector_height;
+    uint32_t cols = img_size / vector_width;
 
     // Vector constants
     __m512 _4p0_vector = _mm512_set1_ps(4.0f);
     __m512i _1_vector = _mm512_set1_epi32(1);
     __m512i max_iters_vector = _mm512_set1_epi32(max_iters);
 
-    for (uint64_t i = 0; i < img_size; ++i) {
-        // Get the plane coordinate cy for the image pixel.
-        __m512 cy_vector = _mm512_set1_ps((float(i) / float(img_size)) * window_zoom + window_y);
-        for (uint64_t j = 0; j < vector_size; ++j) {
-            // Get the plane coordinate cx for the image pixel.
-            __m512 cx_vector = _mm512_set_ps(
-                (float(j * 16 + 15) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 14) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 13) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 12) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 11) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 10) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 9) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 8) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 7) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 6) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 5) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 4) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 3) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 2) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 1) / float(img_size)) * window_zoom + window_x,
-                (float(j * 16 + 0) / float(img_size)) * window_zoom + window_x
-            );
+    // Select the appropriate vindex for writing to memory
+    __m512i vindex;
+    if (vector_width == 16) {
+        vindex = _1b16_vindex;
+    } else if (vector_width == 8) {
+        __m512i voffset = _mm512_set_epi32(img_size, img_size, img_size, img_size, img_size, img_size, img_size, img_size, 0, 0, 0, 0, 0, 0, 0, 0);
+        vindex = _mm512_add_epi32(_2b8_vindex, voffset);
+    } else if (vector_width == 4) {
+        __m512i voffset = _mm512_set_epi32(3*img_size, 3*img_size, 3*img_size, 3*img_size, 2*img_size, 2*img_size, 2*img_size, 2*img_size, img_size, img_size, img_size, img_size, 0, 0, 0, 0);
+        vindex = _mm512_add_epi32(_4b4_vindex, voffset);
+    } else if (vector_width == 2) {
+        __m512i voffset = _mm512_set_epi32(7*img_size, 7*img_size, 6*img_size, 6*img_size, 5*img_size, 5*img_size, 4*img_size, 4*img_size, 3*img_size, 3*img_size, 2*img_size, 2*img_size, img_size, img_size, 0, 0);
+        vindex = _mm512_add_epi32(_8b2_vindex, voffset);
+    } else if (vector_width == 1) {
+        __m512i voffset = _mm512_set_epi32(15*img_size, 14*img_size, 13*img_size, 12*img_size, 11*img_size, 10*img_size, 9*img_size, 8*img_size, 7*img_size, 6*img_size, 5*img_size, 4*img_size, 3*img_size, 2*img_size, img_size, 0);
+        vindex = _mm512_add_epi32(_16b1_vindex, voffset);
+    } else {
+        // Incorrectly set parameters
+        return;
+    }
 
-            // Innermost loop: start the recursion from z = 0.
+    for (uint64_t i = 0; i < rows; ++i) {
+        // Precompute the cy plane coordinates for this row of vectors.
+        float cy[vector_height];
+        for (uint64_t vi = 0; vi < vector_height; ++vi) {
+            cy[vi] = (float(i * vector_height + vi) / float(img_size)) * window_zoom + window_y;
+        }
+        for (uint64_t j = 0; j < cols; ++j) {
+            // Set the cy and cx vectors
+            float cy_vector_vals[vector_size];
+            float cx_vector_vals[vector_size];
+            for (uint64_t vi = 0; vi < vector_height; ++vi) {
+                for (uint64_t vj = 0; vj < vector_width; ++vj) {
+                    cy_vector_vals[vi * vector_width + vj] = cy[vi];
+                    cx_vector_vals[vi * vector_width + vj] = (float(j * vector_width + vj) / float(img_size)) * window_zoom + window_x;
+                }
+            }
+            __m512 cy_vector = _mm512_loadu_ps(cy_vector_vals);
+            __m512 cx_vector = _mm512_loadu_ps(cx_vector_vals);
+
+            // Set the other state vectors
             __m512 x2_vector = _mm512_set1_ps(0.0f);
             __m512 y2_vector = _mm512_set1_ps(0.0f);
             __m512 w_vector = _mm512_set1_ps(0.0f);
@@ -101,10 +154,11 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
             __m512 x2y2_vector = _mm512_set1_ps(0.0f);
 
             // While condition mask is a 16bit int where each bit is the boolean for each vector, so finished the computation when equals 0
-            // Condition: x2 + y2 <= 4.0 and iters < max_iters
             __mmask16 while_condition_mask = 65535; // All vector lanes are true
             
-            while (while_condition_mask > 0) {
+            // Condition: x2 + y2 <= 4.0 and iters < max_iters
+            uint32_t tot_iters = 0;
+            while (while_condition_mask > 0 && tot_iters < max_iters) {
                 // Update x2, y2, and w for all vectors
                 __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(x2_vector, y2_vector), cx_vector);
                 __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(w_vector, x2y2_vector), cy_vector);
@@ -118,14 +172,14 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
                 iters_vector = _mm512_mask_add_epi32(iters_vector, while_condition_mask, iters_vector, _1_vector);
 
                 // Update the while mask
-                __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(x2y2_vector, _4p0_vector, _MM_CMPINT_LE);
-                __mmask16 iters_cmp_mask = _mm512_cmp_epi32_mask(iters_vector, max_iters_vector, _MM_CMPINT_LT);
-                while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
+                while_condition_mask = _mm512_cmp_ps_mask(x2y2_vector, _4p0_vector, _MM_CMPINT_LE);
+
+                // Update the total iters for the max iters condition
+                ++tot_iters;
             }
 
-            // Write result.
-            uint32_t *mem_addr = out + i * img_size + j * 16;
-            _mm512_storeu_si512(mem_addr, iters_vector);
+            // Write vector to memory
+            write_tile_vector_to_memory(out, iters_vector, i * vector_height, j * vector_width, img_size, vindex);
         }
     }
 }
@@ -162,26 +216,6 @@ void set_coordinate_vector(__m512 *vector, bool is_vector_row, bool is_cy, uint6
             (float(pixel_idx + 0) / float(img_size)) * window_zoom + window
         );
     }
-}
-
-void write_row_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size) {
-    uint32_t *mem_addr = out + i * img_size + j;
-    _mm512_storeu_si512(mem_addr, vector);
-}
-
-void write_col_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint64_t j, uint32_t img_size, __m512i vindex) {
-    // Scalar memory write
-    // uint64_t base = i * (uint64_t)img_size + j;
-    // alignas(64) uint32_t tmp[16];
-    // // Store vector lanes to tmp in lane order: tmp[0] is lane0, tmp[15] is lane15
-    // _mm512_storeu_si512((__m512i*)tmp, vector);
-    // for (int k = 0; k < 16; ++k) {
-    //     out[base + (uint64_t)k * img_size] = tmp[k];
-    // }
-
-    // Vector memory write
-    uint32_t *mem_addr = out + i * img_size + j;
-    _mm512_i32scatter_epi32(mem_addr, vindex, vector, 4);
 }
 
 void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
