@@ -82,57 +82,35 @@ __global__ void mandelbrot_gpu_vector_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    // Type of vector
-    uint8_t vector_size = 32; // 32 wide GPU vector lanes
-    bool is_vector_row = true; // true for row, false for col
-
     // Vector dimensions
-    uint8_t vector_row_size = is_vector_row ? 1 : vector_size;
-    uint8_t vector_col_size = is_vector_row ? vector_size : 1;
-    uint8_t vector_rows = 4;
-    uint8_t vector_cols = 1;
-    constexpr uint8_t vectors_per_block = 4 * 1; // vector_rows * vector_cols
+    constexpr uint8_t vector_size = 32; // 32 wide GPU vector lanes
+    constexpr uint8_t vector_rows = 4; // Tuning parameter
 
-    // Vector block dimensions
-    uint64_t block_row_size = vector_rows * vector_row_size;
-    uint64_t block_col_size = vector_cols * vector_col_size;
-    uint64_t block_rows = img_size / block_row_size;
-    uint64_t block_cols = img_size / block_col_size;
+    // Block dimensions
+    uint64_t block_rows = img_size / vector_rows;
+    uint64_t block_cols = img_size / vector_size;
 
     // Get the specific pixel in the vector for this thread
-    uint8_t vector_pixel_i = 0;
-    uint8_t vector_pixel_j = 0;
-    if (is_vector_row) {
-        vector_pixel_j = threadIdx.x;
-    } else {
-        vector_pixel_i = threadIdx.x;
-    }
+    uint8_t vector_pixel = threadIdx.x;
 
     // Iterate over blocks of vectors
+    uint64_t block_pixel_i = 0;
+    uint64_t block_pixel_j = 0;
     for (uint64_t block_i = 0; block_i < block_rows; ++block_i) {
         for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
-            // The starting pixel of the block
-            uint64_t block_pixel_i = block_i * block_row_size;
-            uint64_t block_pixel_j = block_j * block_col_size;
-
             // Initialize vector state
-            float x2[vectors_per_block] = {0.0f};
-            float y2[vectors_per_block] = {0.0f};
-            float w[vectors_per_block] = {0.0f};
-            uint32_t iters[vectors_per_block] = {0};
-            bool done[vectors_per_block] = {false};
+            float x2[vector_rows] = {0.0f};
+            float y2[vector_rows] = {0.0f};
+            float w[vector_rows] = {0.0f};
+            uint32_t iters[vector_rows] = {0};
+            bool done[vector_rows] = {false};
 
-            // Precompute the plane coordinate for the image pixel.
-            float cx[vectors_per_block];
-            float cy[vectors_per_block];
-            for (uint64_t v = 0; v < vectors_per_block; ++v) {
-                // Get the vector_i, vector_j coordinates in the block
-                uint64_t vector_i = v / vector_cols;
-                uint64_t vector_j = v % vector_cols;
-                // The starting pixel of the vector
-                uint64_t pixel_i = block_pixel_i + vector_i * vector_row_size + vector_pixel_i;
-                uint64_t pixel_j = block_pixel_j + vector_j * vector_col_size + vector_pixel_j;
-                // Set the plane coordinates
+            // Precompute the plane coordinate for the image pixels in the vector block
+            float cx[vector_rows];
+            float cy[vector_rows];
+            for (uint64_t v = 0; v < vector_rows; ++v) {
+                uint64_t pixel_i = block_pixel_i + v;
+                uint64_t pixel_j = block_pixel_j + vector_pixel;
                 cy[v] = (float(pixel_i) / float(img_size)) * window_zoom + window_y;
                 cx[v] = (float(pixel_j) / float(img_size)) * window_zoom + window_x;
             }
@@ -143,9 +121,10 @@ __global__ void mandelbrot_gpu_vector_ilp(
             while (while_condition && tot_iters < max_iters) {
                 // Reset while condition
                 while_condition = false;
+                
                 // Iterate over vectors in the block, interleaving the vectors to unlock ILP
                 #pragma unroll
-                for (uint64_t v = 0; v < vectors_per_block; ++v) {
+                for (uint64_t v = 0; v < vector_rows; ++v) {
                     // Inner loop math
                     float x = x2[v] - y2[v] + cx[v];
                     float y = w[v] - (x2[v] + y2[v]) + cy[v];
@@ -153,30 +132,32 @@ __global__ void mandelbrot_gpu_vector_ilp(
                     y2[v] = y * y;
                     float z = x + y;
                     w[v] = z * z;
+                    iters[v] += done[v] ? 0 : 1;
                     
                     // Update vector while condition
-                    bool condition =  (x2[v] + y2[v] <= 4.0f);
-                    done[v] = done[v] || condition;
-                    iters[v] += done[v] ? 1 : 0;
+                    done[v] = done[v] || (x2[v] + y2[v] > 4.0f);
 
                     // Update while condition
-                    while_condition = while_condition || condition;
+                    while_condition = while_condition || !done[v];
                 }
+
                 ++tot_iters;
             }
 
             // Write result for all vectors
-            for (uint64_t v = 0; v < vectors_per_block; ++v) {
-                // Get the vector_i, vector_j coordinates in the block
-                uint64_t vector_i = v / vector_cols;
-                uint64_t vector_j = v % vector_cols;
-                // The starting pixel of the vector
-                uint64_t pixel_i = block_pixel_i + vector_i * vector_row_size + vector_pixel_i;
-                uint64_t pixel_j = block_pixel_j + vector_j * vector_col_size + vector_pixel_j;
-                // Write result
+            for (uint64_t v = 0; v < vector_rows; ++v) {
+                uint64_t pixel_i = block_pixel_i + v;
+                uint64_t pixel_j = block_pixel_j + vector_pixel;
                 out[pixel_i * img_size + pixel_j] = iters[v];
             }
+
+            // Move to the next vector block
+            block_pixel_j += 32;
         }
+
+        // Move to the next row of vector blocks
+        block_pixel_i += vector_rows;
+        block_pixel_j = 0;
     }
 }
 
@@ -185,7 +166,7 @@ void launch_mandelbrot_gpu_vector_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    mandelbrot_gpu_vector<<<1, 32>>>(img_size, max_iters, out);
+    mandelbrot_gpu_vector_ilp<<<1, 32>>>(img_size, max_iters, out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
