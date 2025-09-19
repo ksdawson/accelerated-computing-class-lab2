@@ -22,32 +22,36 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 
 /// <--- your code here --->
 
+// Vector dimensions: 32x1, 16x2, 8x4, 4x8, 2x16, 1x32
+constexpr uint8_t vector_size = 32; // 32 wide GPU vector lanes
+constexpr uint8_t vector_width = 4; // Tuning parameter
+constexpr uint8_t vector_height = vector_size / vector_width;
+
+// ILP dimensions
+constexpr uint8_t ilp_single_warp_size = 4; // Tuning parameter
+constexpr uint8_t ilp_full_warp_size = 2; // Tuning parameter
+// TODO: Allow for custom ILP sizes?
+
 // Helper functions
 __device__ void thread_strided_mandelbrot_gpu(
     uint32_t img_size,
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    // Vector dimensions: 32x1, 16x2, 8x4, 4x8, 2x16, 1x32
-    constexpr uint8_t vector_size = 32; // 32 wide GPU vector lanes
-    constexpr uint8_t vector_width = 4; // Tuning parameter
-    constexpr uint8_t vector_height = vector_size / vector_width;
+    // Dimensions needed for tiling
     uint32_t num_vectors_per_row = img_size / vector_width;
 
-    // Thread index
+    // Thread info
     int tot_threads = gridDim.x * blockDim.x;
     int thread_index = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Flatten the 2D iteration space into 1D and jump tot_threads pixels each iteration
-    uint64_t pixel_index = thread_index;
-    uint64_t max_pixel_index = img_size * img_size;
-
-    while (pixel_index < max_pixel_index) {
+    // Flatten the 2D iteration space into 1D and stride tot_threads pixels each iteration
+    for (uint64_t pixel_index = thread_index; pixel_index < img_size * img_size; pixel_index += tot_threads) {
         // Re-map the pixel index to tiles of vector height x vector width
-        uint32_t tile_id = pixel_index / vector_size;
+        uint32_t tile_index = pixel_index / vector_size;
         uint32_t tile_offset = pixel_index % vector_size;
-        uint32_t tile_i = tile_id / num_vectors_per_row;
-        uint32_t tile_j = tile_id % num_vectors_per_row;
+        uint32_t tile_i = tile_index / num_vectors_per_row;
+        uint32_t tile_j = tile_index % num_vectors_per_row;
 
         // Calculate 2D pixel coordinates from the flattened tile index
         uint32_t vector_i = tile_offset / vector_width;
@@ -62,13 +66,15 @@ __device__ void thread_strided_mandelbrot_gpu(
         // Innermost loop: start the recursion from z = 0
         float x2 = 0.0f;
         float y2 = 0.0f;
+        float x2y2 = 0.0f;
         float w = 0.0f;
         uint32_t iters = 0;
-        while (x2 + y2 <= 4.0f && iters < max_iters) {
+        while (x2y2 <= 4.0f && iters < max_iters) {
             float x = x2 - y2 + cx;
-            float y = w - (x2 + y2) + cy;
+            float y = w - x2y2 + cy;
             x2 = x * x;
             y2 = y * y;
+            x2y2 = x2 + y2;
             float z = x + y;
             w = z * z;
             ++iters;
@@ -76,9 +82,92 @@ __device__ void thread_strided_mandelbrot_gpu(
 
         // Write result
         out[i * img_size + j] = iters;
+    }
+}
 
-        // Stride tot_threads pixels to the next pixel to process
-        pixel_index += tot_threads;
+template <uint8_t ilp_size>
+__device__ void thread_strided_mandelbrot_gpu_ilp(
+    uint32_t img_size,
+    uint32_t max_iters,
+    uint32_t *out /* pointer to GPU memory */
+) {
+    // Dimensions needed for tiling
+    uint32_t num_vectors_per_row = img_size / vector_width;
+
+    // Thread info
+    int tot_threads = gridDim.x * blockDim.x;
+    int thread_index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Transform thread index to account for ILP
+    thread_index *= ilp_size;
+
+    // Flatten the 2D iteration space into 1D and stride tot_threads * ilp_size pixels each iteration
+    for (uint64_t pixel_index = thread_index; pixel_index < img_size * img_size; pixel_index += tot_threads * ilp_size) {
+        // Initialize ILP state (pixels this thread will work on)
+        float x2[ilp_size] = {0.0f};
+        float y2[ilp_size] = {0.0f};
+        float x2y2[ilp_size] = {0.0f};
+        float w[ilp_size] = {0.0f};
+        uint32_t iters[ilp_size] = {0};
+        bool done[ilp_size] = {false};
+        float cx[ilp_size];
+        float cy[ilp_size];
+        for (uint8_t v = 0; v < ilp_size; ++v) {
+            // Re-map the pixel index to tiles of vector height x vector width
+            uint32_t tile_index = (pixel_index + v) / vector_size;
+            uint32_t tile_offset = (pixel_index + v) % vector_size;
+            uint32_t tile_i = tile_index / num_vectors_per_row;
+            uint32_t tile_j = tile_index % num_vectors_per_row;
+            // Calculate 2D pixel coordinates from the flattened tile index
+            uint32_t vector_i = tile_offset / vector_width;
+            uint32_t vector_j = tile_offset % vector_width;
+            uint32_t i = tile_i * vector_height + vector_i;
+            uint32_t j = tile_j * vector_width + vector_j;
+            // Compute the plane coordinate for the image pixel in the ILP block
+            cx[v] = (float(j) / float(img_size)) * window_zoom + window_x;
+            cy[v] = (float(i) / float(img_size)) * window_zoom + window_y;
+        }
+
+        // Innermost loop: start the recursion from z = 0
+        bool while_condition = true;
+        uint32_t tot_iters = 0;
+        while (while_condition && tot_iters < max_iters) {
+            // Reset while condition
+            while_condition = false;
+            // Iterate over pixels in the block, interleaving the instructions to unlock ILP
+            #pragma unroll
+            for (uint8_t v = 0; v < ilp_size; ++v) {
+                // Inner loop math
+                float x = x2[v] - y2[v] + cx[v];
+                float y = w[v] - x2y2[v] + cy[v];
+                x2[v] = x * x;
+                y2[v] = y * y;
+                x2y2[v] = x2[v] + y2[v];
+                float z = x + y;
+                w[v] = z * z;
+                iters[v] += done[v] ? 0 : 1;
+                // Update vector while condition
+                done[v] = done[v] || (x2y2[v] > 4.0f);
+                // Update while condition
+                while_condition = while_condition || !done[v];
+            }
+            ++tot_iters;
+        }
+
+        // Write result for all vectors
+        for (uint8_t v = 0; v < ilp_size; ++v) {
+            // Re-map the pixel index to tiles of vector height x vector width
+            uint32_t tile_index = (pixel_index + v) / vector_size;
+            uint32_t tile_offset = (pixel_index + v) % vector_size;
+            uint32_t tile_i = tile_index / num_vectors_per_row;
+            uint32_t tile_j = tile_index % num_vectors_per_row;
+            // Calculate 2D pixel coordinates from the flattened tile index
+            uint32_t vector_i = tile_offset / vector_width;
+            uint32_t vector_j = tile_offset % vector_width;
+            uint32_t i = tile_i * vector_height + vector_i;
+            uint32_t j = tile_j * vector_width + vector_j;
+            out[i * img_size + j] = iters[v];
+        }
     }
 }
 
@@ -117,83 +206,7 @@ __global__ void mandelbrot_gpu_vector_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    // Vector dimensions
-    constexpr uint8_t vector_size = 32; // 32 wide GPU vector lanes
-    constexpr uint8_t vector_rows = 4; // Tuning parameter
-
-    // Block dimensions
-    uint64_t block_rows = img_size / vector_rows;
-    uint64_t block_cols = img_size / vector_size;
-
-    // Get the specific pixel in the vector for this thread
-    uint8_t vector_pixel = threadIdx.x;
-
-    // Iterate over blocks of vectors
-    uint64_t block_pixel_i = 0;
-    uint64_t block_pixel_j = 0;
-    for (uint64_t block_i = 0; block_i < block_rows; ++block_i) {
-        for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
-            // Initialize vector state
-            float x2[vector_rows] = {0.0f};
-            float y2[vector_rows] = {0.0f};
-            float w[vector_rows] = {0.0f};
-            uint32_t iters[vector_rows] = {0};
-            bool done[vector_rows] = {false};
-
-            // Precompute the plane coordinate for the image pixels in the vector block
-            float cx[vector_rows];
-            float cy[vector_rows];
-            for (uint64_t v = 0; v < vector_rows; ++v) {
-                uint64_t pixel_i = block_pixel_i + v;
-                uint64_t pixel_j = block_pixel_j + vector_pixel;
-                cy[v] = (float(pixel_i) / float(img_size)) * window_zoom + window_y;
-                cx[v] = (float(pixel_j) / float(img_size)) * window_zoom + window_x;
-            }
-
-            // Innermost loop: start the recursion from z = 0.
-            bool while_condition = true;
-            uint32_t tot_iters = 0;
-            while (while_condition && tot_iters < max_iters) {
-                // Reset while condition
-                while_condition = false;
-                
-                // Iterate over vectors in the block, interleaving the vectors to unlock ILP
-                #pragma unroll
-                for (uint64_t v = 0; v < vector_rows; ++v) {
-                    // Inner loop math
-                    float x = x2[v] - y2[v] + cx[v];
-                    float y = w[v] - (x2[v] + y2[v]) + cy[v];
-                    x2[v] = x * x;
-                    y2[v] = y * y;
-                    float z = x + y;
-                    w[v] = z * z;
-                    iters[v] += done[v] ? 0 : 1;
-                    
-                    // Update vector while condition
-                    done[v] = done[v] || (x2[v] + y2[v] > 4.0f);
-
-                    // Update while condition
-                    while_condition = while_condition || !done[v];
-                }
-
-                ++tot_iters;
-            }
-
-            // Write result for all vectors
-            for (uint64_t v = 0; v < vector_rows; ++v) {
-                uint64_t pixel_i = block_pixel_i + v;
-                uint64_t pixel_j = block_pixel_j + vector_pixel;
-                out[pixel_i * img_size + pixel_j] = iters[v];
-            }
-
-            // Move to the next vector block
-            block_pixel_j += 32;
-        }
-
-        // Move to the next row of vector blocks
-        block_pixel_i += vector_rows;
-        block_pixel_j = 0;
-    }
+    thread_strided_mandelbrot_gpu_ilp<ilp_single_warp_size>(img_size, max_iters, out);
 }
 
 void launch_mandelbrot_gpu_vector_ilp(
@@ -269,7 +282,7 @@ __global__ void mandelbrot_gpu_vector_multicore_multithread_full_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (GPU) code here... */
+    thread_strided_mandelbrot_gpu_ilp<ilp_full_warp_size>(img_size, max_iters, out);
 }
 
 void launch_mandelbrot_gpu_vector_multicore_multithread_full_ilp(
@@ -277,7 +290,7 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_full_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (CPU) code here... */
+    mandelbrot_gpu_vector_multicore_multithread_full_ilp<<<48, 32 * 32>>>(img_size, max_iters, out);
 }
 
 /// <--- /your code here --->
