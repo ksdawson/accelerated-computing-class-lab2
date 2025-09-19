@@ -465,7 +465,7 @@ void mandelbrot_cpu_vector_multicore(
 
     // Block dimensions: 8x1, 4x2, 2x4, 1x8
     uint32_t block_rows = 1; // Tuning parameter
-    uint32_t block_cols = 8; // Tuning parameter
+    uint32_t block_cols = num_cores / block_rows;
     uint32_t block_width = img_size / block_cols;
     uint32_t block_height = img_size / block_rows;
 
