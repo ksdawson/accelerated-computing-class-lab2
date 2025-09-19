@@ -500,7 +500,45 @@ void mandelbrot_cpu_vector_multicore_multithread(
     uint32_t img_size,
     uint32_t max_iters,
     uint32_t *out) {
-    // TODO: Implement this function.
+    // 8 cores in our CPU
+    constexpr uint8_t num_cores = 8;
+    constexpr uint8_t num_threads_per_core = 2;
+    constexpr uint8_t n = num_cores * num_threads_per_core;
+
+    // Struct to hold the thread args
+    ThreadArgs thread_args[n];
+
+    // Keep track of the threads
+    pthread_t threads[n];
+
+    // Block dimensions: 8x1, 4x2, 2x4, 1x8
+    uint32_t block_rows = 1; // Tuning parameter
+    uint32_t block_cols = n / block_rows;
+    uint32_t block_width = img_size / block_cols;
+    uint32_t block_height = img_size / block_rows;
+
+    // Spawn a thread for each block
+    for (uint64_t block_i = 0; block_i < block_rows; ++block_i) {
+        // Iteration dimensions
+        uint32_t rows_start = block_i * block_height;
+        uint32_t rows_end = rows_start + block_height;
+        for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
+            // Iteration dimensions
+            uint32_t cols_start = block_j * block_width;
+            uint32_t cols_end = cols_start + block_width;
+
+            // Thread params
+            uint8_t thread_idx = block_i * block_cols + block_j;
+            thread_args[thread_idx] = { img_size, max_iters, out, rows_start, rows_end, cols_start, cols_end };
+
+            pthread_create(&threads[thread_idx], NULL, worker, &thread_args[thread_idx]);
+        }
+    }
+
+    // Wait for all the threads to finish
+    for (uint8_t thread_idx = 0; thread_idx < n; ++thread_idx) {
+        pthread_join(threads[thread_idx], NULL);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////

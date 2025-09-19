@@ -186,22 +186,13 @@ __global__ void mandelbrot_gpu_vector_multicore(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
+    // Thread index
     int tot_threads = gridDim.x * blockDim.x;
     int thread_index = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // uint64_t start_i = thread_index / img_size;
-    // uint64_t j = thread_index % img_size;
-
-    uint64_t block_id = thread_index / 32;
-    uint64_t block_i = block_id / (img_size / 16);
-    uint64_t block_j = block_id % (img_size / 16);
-
-    uint64_t vector_id = thread_index % 32;
-    uint64_t vector_i = vector_id / 16;
-    uint64_t vector_j = vector_id % 16;
-
-    uint64_t start_i = block_i * 2 + vector_i;
-    uint64_t j = block_j * 16 + vector_j;
+    // Pixel index
+    uint64_t start_i = thread_index / img_size;
+    uint64_t j = thread_index % img_size;
 
     // Get the plane coordinate X for the image pixel.
     float cx = (float(j) / float(img_size)) * window_zoom + window_x;
