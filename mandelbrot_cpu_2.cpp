@@ -14,6 +14,15 @@ constexpr float window_x = -0.743643887 - 0.5 * window_zoom;
 constexpr float window_y = 0.131825904 - 0.5 * window_zoom;
 constexpr uint32_t default_max_iters = 2000;
 
+// Vector dimensions: 16x1, 8x2, 4x4, 2x4, 1x16
+constexpr uint8_t vector_size = 16; // 16 32bit ints/floats in an AVX-512 vector
+constexpr uint8_t vector_width = 4; // Tuning parameter
+constexpr uint8_t vector_height = 4; // Tuning parameter
+
+// Thread dimensions
+constexpr uint8_t num_threads_per_core_single_thread = 1;
+constexpr uint8_t num_threads_per_core_multi_thread = 2; // Tuning parameter
+
 // Vindexes for writing to memory
 __m512i _1b16_vindex = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0); // add img_size 0 to 0
 __m512i _2b8_vindex = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2, 1, 0); // add img_size 0 to 1
@@ -47,60 +56,9 @@ void write_tile_vector_to_memory(uint32_t *out, __m512i vector, uint64_t i, uint
     _mm512_i32scatter_epi32(mem_addr, vindex, vector, 4);
 }
 
-// CPU Scalar Mandelbrot set generation.
-// Based on the "optimized escape time algorithm" in
-// https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set
-void mandelbrot_cpu_scalar(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    for (uint64_t i = 0; i < img_size; ++i) {
-        for (uint64_t j = 0; j < img_size; ++j) {
-            float cx = (float(j) / float(img_size)) * window_zoom + window_x;
-            float cy = (float(i) / float(img_size)) * window_zoom + window_y;
-
-            float x2 = 0.0f;
-            float y2 = 0.0f;
-            float w = 0.0f;
-            uint32_t iters = 0;
-            while (x2 + y2 <= 4.0f && iters < max_iters) {
-                float x = x2 - y2 + cx;
-                float y = w - (x2 + y2) + cy;
-                x2 = x * x;
-                y2 = y * y;
-                float z = x + y;
-                w = z * z;
-                ++iters;
-            }
-
-            // Write result.
-            out[i * img_size + j] = iters;
-        }
-    }
-}
-
-uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
-
-/// <--- your code here --->
-
-// OPTIONAL: Uncomment this block to include your CPU vector implementation
-// from Lab 1 for easy comparison.
-//
-// (If you do this, you'll need to update your code to use the new constants
-// 'window_zoom', 'window_x', and 'window_y'.)
-
-#define HAS_VECTOR_IMPL // <~~ keep this line if you want to benchmark the vector kernel!
-
-////////////////////////////////////////////////////////////////////////////////
-// Vector
-
-void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
-    // Vector dimensions: 16x1, 8x2, 4x4, 2x4, 1x16
-    constexpr uint8_t vector_size = 16; // 16 32bit ints/floats in an AVX-512 vector
-    constexpr uint8_t vector_width = 4;
-    constexpr uint8_t vector_height = 4;
-
-    // Iteration dimensions
-    uint32_t rows = img_size / vector_height;
-    uint32_t cols = img_size / vector_width;
-
+void mandelbrot_cpu_vector_helper(uint32_t img_size, uint32_t max_iters, uint32_t *out, // Image parameters
+    uint32_t rows_start, uint32_t rows_end, uint32_t cols_start, uint32_t cols_end // Block dimensions
+) {
     // Vector constants
     __m512 _4p0_vector = _mm512_set1_ps(4.0f);
     __m512i _1_vector = _mm512_set1_epi32(1);
@@ -127,13 +85,13 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
         return;
     }
 
-    for (uint64_t i = 0; i < rows; ++i) {
+    for (uint64_t i = rows_start / vector_height; i < rows_end / vector_height; ++i) {
         // Precompute the cy plane coordinates for this row of vectors.
         float cy[vector_height];
         for (uint64_t vi = 0; vi < vector_height; ++vi) {
             cy[vi] = (float(i * vector_height + vi) / float(img_size)) * window_zoom + window_y;
         }
-        for (uint64_t j = 0; j < cols; ++j) {
+        for (uint64_t j = cols_start / vector_width; j < cols_end / vector_width; ++j) {
             // Set the cy and cx vectors
             float cy_vector_vals[vector_size];
             float cx_vector_vals[vector_size];
@@ -182,6 +140,56 @@ void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out)
             write_tile_vector_to_memory(out, iters_vector, i * vector_height, j * vector_width, img_size, vindex);
         }
     }
+}
+
+// CPU Scalar Mandelbrot set generation.
+// Based on the "optimized escape time algorithm" in
+// https://en.wikipedia.org/wiki/Plotting_algorithms_for_the_Mandelbrot_set
+void mandelbrot_cpu_scalar(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
+    for (uint64_t i = 0; i < img_size; ++i) {
+        for (uint64_t j = 0; j < img_size; ++j) {
+            float cx = (float(j) / float(img_size)) * window_zoom + window_x;
+            float cy = (float(i) / float(img_size)) * window_zoom + window_y;
+
+            float x2 = 0.0f;
+            float y2 = 0.0f;
+            float w = 0.0f;
+            uint32_t iters = 0;
+            while (x2 + y2 <= 4.0f && iters < max_iters) {
+                float x = x2 - y2 + cx;
+                float y = w - (x2 + y2) + cy;
+                x2 = x * x;
+                y2 = y * y;
+                float z = x + y;
+                w = z * z;
+                ++iters;
+            }
+
+            // Write result.
+            out[i * img_size + j] = iters;
+        }
+    }
+}
+
+uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
+
+/// <--- your code here --->
+
+// OPTIONAL: Uncomment this block to include your CPU vector implementation
+// from Lab 1 for easy comparison.
+//
+// (If you do this, you'll need to update your code to use the new constants
+// 'window_zoom', 'window_x', and 'window_y'.)
+
+#define HAS_VECTOR_IMPL // <~~ keep this line if you want to benchmark the vector kernel!
+
+////////////////////////////////////////////////////////////////////////////////
+// Vector
+
+void mandelbrot_cpu_vector(uint32_t img_size, uint32_t max_iters, uint32_t *out) {
+    mandelbrot_cpu_vector_helper(img_size, max_iters, out, // Image parameters
+        0, img_size, 0, img_size // Block dimensions
+    );
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -337,97 +345,6 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
 ////////////////////////////////////////////////////////////////////////////////
 // Vector + Multi-core
 
-void mandelbrot_cpu_vector_multicore_helper(uint32_t img_size, uint32_t max_iters, uint32_t *out, // Image parameters
-    uint32_t rows_start, uint32_t rows_end, uint32_t cols_start, uint32_t cols_end // Block dimensions
-) {
-    // Vector dimensions: 16x1, 8x2, 4x4, 2x4, 1x16
-    constexpr uint8_t vector_size = 16; // 16 32bit ints/floats in an AVX-512 vector
-    constexpr uint8_t vector_width = 4; // Tuning parameter
-    constexpr uint8_t vector_height = 4; // Tuning parameter
-
-    // Vector constants
-    __m512 _4p0_vector = _mm512_set1_ps(4.0f);
-    __m512i _1_vector = _mm512_set1_epi32(1);
-    __m512i max_iters_vector = _mm512_set1_epi32(max_iters);
-
-    // Select the appropriate vindex for writing to memory
-    __m512i vindex;
-    if (vector_width == 16) {
-        vindex = _1b16_vindex;
-    } else if (vector_width == 8) {
-        __m512i voffset = _mm512_set_epi32(img_size, img_size, img_size, img_size, img_size, img_size, img_size, img_size, 0, 0, 0, 0, 0, 0, 0, 0);
-        vindex = _mm512_add_epi32(_2b8_vindex, voffset);
-    } else if (vector_width == 4) {
-        __m512i voffset = _mm512_set_epi32(3*img_size, 3*img_size, 3*img_size, 3*img_size, 2*img_size, 2*img_size, 2*img_size, 2*img_size, img_size, img_size, img_size, img_size, 0, 0, 0, 0);
-        vindex = _mm512_add_epi32(_4b4_vindex, voffset);
-    } else if (vector_width == 2) {
-        __m512i voffset = _mm512_set_epi32(7*img_size, 7*img_size, 6*img_size, 6*img_size, 5*img_size, 5*img_size, 4*img_size, 4*img_size, 3*img_size, 3*img_size, 2*img_size, 2*img_size, img_size, img_size, 0, 0);
-        vindex = _mm512_add_epi32(_8b2_vindex, voffset);
-    } else if (vector_width == 1) {
-        __m512i voffset = _mm512_set_epi32(15*img_size, 14*img_size, 13*img_size, 12*img_size, 11*img_size, 10*img_size, 9*img_size, 8*img_size, 7*img_size, 6*img_size, 5*img_size, 4*img_size, 3*img_size, 2*img_size, img_size, 0);
-        vindex = _mm512_add_epi32(_16b1_vindex, voffset);
-    } else {
-        // Incorrectly set parameters
-        return;
-    }
-
-    for (uint64_t i = rows_start / vector_height; i < rows_end / vector_height; ++i) {
-        // Precompute the cy plane coordinates for this row of vectors.
-        float cy[vector_height];
-        for (uint64_t vi = 0; vi < vector_height; ++vi) {
-            cy[vi] = (float(i * vector_height + vi) / float(img_size)) * window_zoom + window_y;
-        }
-        for (uint64_t j = cols_start / vector_width; j < cols_end / vector_width; ++j) {
-            // Set the cy and cx vectors
-            float cy_vector_vals[vector_size];
-            float cx_vector_vals[vector_size];
-            for (uint64_t vi = 0; vi < vector_height; ++vi) {
-                for (uint64_t vj = 0; vj < vector_width; ++vj) {
-                    cy_vector_vals[vi * vector_width + vj] = cy[vi];
-                    cx_vector_vals[vi * vector_width + vj] = (float(j * vector_width + vj) / float(img_size)) * window_zoom + window_x;
-                }
-            }
-            __m512 cy_vector = _mm512_loadu_ps(cy_vector_vals);
-            __m512 cx_vector = _mm512_loadu_ps(cx_vector_vals);
-
-            // Set the other state vectors
-            __m512 x2_vector = _mm512_set1_ps(0.0f);
-            __m512 y2_vector = _mm512_set1_ps(0.0f);
-            __m512 w_vector = _mm512_set1_ps(0.0f);
-            __m512i iters_vector = _mm512_set1_epi32(0);
-            __m512 x2y2_vector = _mm512_set1_ps(0.0f);
-
-            // While condition mask is a 16bit int where each bit is the boolean for each vector, so finished the computation when equals 0
-            __mmask16 while_condition_mask = 65535; // All vector lanes are true
-            
-            // Condition: x2 + y2 <= 4.0 and iters < max_iters
-            uint32_t tot_iters = 0;
-            while (while_condition_mask > 0 && tot_iters < max_iters) {
-                // Update x2, y2, and w for all vectors
-                __m512 x_vector = _mm512_add_ps(_mm512_sub_ps(x2_vector, y2_vector), cx_vector);
-                __m512 y_vector =_mm512_add_ps(_mm512_sub_ps(w_vector, x2y2_vector), cy_vector);
-                x2_vector = _mm512_mul_ps(x_vector, x_vector);
-                y2_vector = _mm512_mul_ps(y_vector, y_vector);
-                x2y2_vector = _mm512_add_ps(x2_vector, y2_vector);
-                __m512 z_vector = _mm512_add_ps(x_vector, y_vector);
-                w_vector = _mm512_mul_ps(z_vector, z_vector);
-
-                // Only update iters for the vectors that are not done yet
-                iters_vector = _mm512_mask_add_epi32(iters_vector, while_condition_mask, iters_vector, _1_vector);
-
-                // Update the while mask
-                while_condition_mask = _mm512_cmp_ps_mask(x2y2_vector, _4p0_vector, _MM_CMPINT_LE);
-
-                // Update the total iters for the max iters condition
-                ++tot_iters;
-            }
-
-            // Write vector to memory
-            write_tile_vector_to_memory(out, iters_vector, i * vector_height, j * vector_width, img_size, vindex);
-        }
-    }
-}
-
 // Struct for thread args
 typedef struct {
     uint32_t img_size;
@@ -442,7 +359,7 @@ typedef struct {
 // Worker function
 void *worker(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
-    mandelbrot_cpu_vector_multicore_helper(
+    mandelbrot_cpu_vector_helper(
         args->img_size, args->max_iters, args->out,
         args->rows_start, args->rows_end,
         args->cols_start, args->cols_end
@@ -450,59 +367,13 @@ void *worker(void *arg) {
     return NULL;
 }
 
-void mandelbrot_cpu_vector_multicore(
+template <uint8_t num_threads_per_core>
+void mandelbrot_cpu_vector_multithread_helper(
     uint32_t img_size,
     uint32_t max_iters,
     uint32_t *out) {
     // 8 cores in our CPU
     constexpr uint8_t num_cores = 8;
-
-    // Struct to hold the thread args
-    ThreadArgs thread_args[num_cores];
-
-    // Keep track of the threads
-    pthread_t threads[num_cores];
-
-    // Block dimensions: 8x1, 4x2, 2x4, 1x8
-    uint32_t block_rows = 1; // Tuning parameter
-    uint32_t block_cols = num_cores / block_rows;
-    uint32_t block_width = img_size / block_cols;
-    uint32_t block_height = img_size / block_rows;
-
-    // Spawn a thread for each block
-    for (uint64_t block_i = 0; block_i < block_rows; ++block_i) {
-        // Iteration dimensions
-        uint32_t rows_start = block_i * block_height;
-        uint32_t rows_end = rows_start + block_height;
-        for (uint64_t block_j = 0; block_j < block_cols; ++block_j) {
-            // Iteration dimensions
-            uint32_t cols_start = block_j * block_width;
-            uint32_t cols_end = cols_start + block_width;
-
-            // Thread params
-            uint8_t thread_idx = block_i * block_cols + block_j;
-            thread_args[thread_idx] = { img_size, max_iters, out, rows_start, rows_end, cols_start, cols_end };
-
-            pthread_create(&threads[thread_idx], NULL, worker, &thread_args[thread_idx]);
-        }
-    }
-
-    // Wait for all the threads to finish
-    for (uint8_t thread_idx = 0; thread_idx < num_cores; ++thread_idx) {
-        pthread_join(threads[thread_idx], NULL);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Vector + Multi-core + Multi-thread-per-core
-
-void mandelbrot_cpu_vector_multicore_multithread(
-    uint32_t img_size,
-    uint32_t max_iters,
-    uint32_t *out) {
-    // 8 cores in our CPU
-    constexpr uint8_t num_cores = 8;
-    constexpr uint8_t num_threads_per_core = 2;
     constexpr uint8_t n = num_cores * num_threads_per_core;
 
     // Struct to hold the thread args
@@ -539,6 +410,23 @@ void mandelbrot_cpu_vector_multicore_multithread(
     for (uint8_t thread_idx = 0; thread_idx < n; ++thread_idx) {
         pthread_join(threads[thread_idx], NULL);
     }
+}
+
+void mandelbrot_cpu_vector_multicore(
+    uint32_t img_size,
+    uint32_t max_iters,
+    uint32_t *out) {
+    mandelbrot_cpu_vector_multithread_helper<num_threads_per_core_single_thread>(img_size, max_iters, out);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Vector + Multi-core + Multi-thread-per-core
+
+void mandelbrot_cpu_vector_multicore_multithread(
+    uint32_t img_size,
+    uint32_t max_iters,
+    uint32_t *out) {
+    mandelbrot_cpu_vector_multithread_helper<num_threads_per_core_multi_thread>(img_size, max_iters, out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
