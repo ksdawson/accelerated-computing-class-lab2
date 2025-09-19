@@ -256,7 +256,7 @@ __global__ void mandelbrot_gpu_vector_multicore_multithread_single_sm(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (GPU) code here... */
+    // Not needed as it uses same logic as mandelbrot_gpu_vector_multicore
 }
 
 void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
@@ -264,7 +264,7 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_single_sm(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (CPU) code here... */
+    mandelbrot_gpu_vector_multicore<<<1, 32 * 32>>>(img_size, max_iters, out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -275,7 +275,7 @@ __global__ void mandelbrot_gpu_vector_multicore_multithread_full(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (GPU) code here... */
+    // Not needed as it uses same logic as mandelbrot_gpu_vector_multicore
 }
 
 void launch_mandelbrot_gpu_vector_multicore_multithread_full(
@@ -283,7 +283,7 @@ void launch_mandelbrot_gpu_vector_multicore_multithread_full(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    /* your (CPU) code here... */
+    mandelbrot_gpu_vector_multicore<<<48, 32 * 32>>>(img_size, max_iters, out);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
