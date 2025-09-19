@@ -186,22 +186,38 @@ __global__ void mandelbrot_gpu_vector_multicore(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
+    // Vector dimensions: 32x1, 16x2, 8x4, 4x8, 2x16, 1x32
+    constexpr uint8_t vector_size = 32; // 32 wide GPU vector lanes
+    constexpr uint8_t vector_width = 4; // Tuning parameter
+    constexpr uint8_t vector_height = vector_size / vector_width;
+    uint32_t num_vectors_per_row = img_size / vector_width;
+
     // Thread index
     int tot_threads = gridDim.x * blockDim.x;
     int thread_index = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Pixel index
-    uint64_t start_i = thread_index / img_size;
-    uint64_t j = thread_index % img_size;
+    // Flatten the 2D iteration space into 1D and jump tot_threads pixels each iteration
+    uint64_t pixel_index = thread_index;
+    uint64_t max_pixel_index = img_size * img_size;
 
-    // Get the plane coordinate X for the image pixel.
-    float cx = (float(j) / float(img_size)) * window_zoom + window_x;
+    while (pixel_index < max_pixel_index) {
+        // Re-map the pixel index to tiles of vector height x vector width
+        uint32_t tile_id = pixel_index / vector_size;
+        uint32_t tile_offset = pixel_index % vector_size;
+        uint32_t tile_i = tile_id / num_vectors_per_row;
+        uint32_t tile_j = tile_id % num_vectors_per_row;
 
-    for (uint64_t i = start_i; i < img_size; i += tot_threads / img_size) {
-        // Get the plane coordinate Y for the image pixel.
+        // Calculate 2D pixel coordinates from the flattened tile index
+        uint32_t vector_i = tile_offset / vector_width;
+        uint32_t vector_j = tile_offset % vector_width;
+        uint32_t i = tile_i * vector_height + vector_i;
+        uint32_t j = tile_j * vector_width + vector_j;
+
+        // Get the plane coordinates for the image pixel
+        float cx = (float(j) / float(img_size)) * window_zoom + window_x;
         float cy = (float(i) / float(img_size)) * window_zoom + window_y;
 
-        // Innermost loop: start the recursion from z = 0.
+        // Innermost loop: start the recursion from z = 0
         float x2 = 0.0f;
         float y2 = 0.0f;
         float w = 0.0f;
@@ -216,8 +232,11 @@ __global__ void mandelbrot_gpu_vector_multicore(
             ++iters;
         }
 
-        // Write result.
+        // Write result
         out[i * img_size + j] = iters;
+
+        // Stride tot_threads pixels to the next pixel to process
+        pixel_index += tot_threads;
     }
 }
 
