@@ -291,9 +291,11 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
 
             // Inner loop math
             bool while_condition = true;
-            while (while_condition) {
-                // Do for each vector in our block
+            uint32_t tot_iters = 0;
+            while (while_condition && tot_iters < max_iters) {
+                // Reset while condition
                 while_condition = false;
+                // Iterate over vectors in the block, interleaving the instructions to unlock ILP
                 #pragma unroll
                 for (uint64_t k = 0; k < vectors_per_block; ++k) {
                     auto &vector = vector_block[k];
@@ -316,13 +318,12 @@ void mandelbrot_cpu_vector_ilp(uint32_t img_size, uint32_t max_iters, uint32_t *
                     vector.iters_vector = _mm512_mask_add_epi32(vector.iters_vector, vector.while_condition_mask, vector.iters_vector, _1_vector);
 
                     // Update the vector while mask
-                    __mmask16 x2_plus_y2_cmp_mask = _mm512_cmp_ps_mask(vector.x2y2_vector, _4p0_vector, _MM_CMPINT_LE);
-                    __mmask16 iters_cmp_mask = _mm512_cmp_epi32_mask(vector.iters_vector, max_iters_vector, _MM_CMPINT_LT);
-                    vector.while_condition_mask = x2_plus_y2_cmp_mask & iters_cmp_mask;
+                    vector.while_condition_mask = _mm512_cmp_ps_mask(vector.x2y2_vector, _4p0_vector, _MM_CMPINT_LE);
 
                     // Update block while condition
                     while_condition = while_condition || (vector.while_condition_mask > 0);
                 }
+                ++tot_iters;
             }
 
             // Write results
