@@ -20,6 +20,39 @@ using data_type = float;
     })
 
 ////////////////////////////////////////////////////////////////////////////////
+// Global Memory Load Latency (dependent chain)
+
+__global__ void mem_latency(
+    data_type *n,
+    unsigned long long *d_start,
+    unsigned long long *d_end) {
+    unsigned long long start_time = clock_cycle();
+    unsigned long long end_time   = clock_cycle();
+
+    // Use volatile pointer so compiler doesn’t optimize loads away
+    volatile data_type *ptr = n;
+
+    data_type x = *ptr;  // first load
+    __threadfence();     // make sure the load completes
+
+    start_time = clock_cycle();
+
+    // Dependent chain of loads: each uses the previous value as the address offset
+    // (this ensures serialization, not parallelized caching)
+    for (int i = 0; i < 20; i++) {
+        // Pointer arithmetic based on prior value
+        int offset = (static_cast<int>(x) & 0) ; // keep same location to measure latency
+        x = ptr[offset]; // dependent global load
+    }
+
+    end_time = clock_cycle();
+
+    *n = x;
+    *d_start = start_time;
+    *d_end = end_time;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Basic FMA Latency
 
 __global__ void
@@ -261,6 +294,7 @@ int main() {
     run_kernel_and_print(fma_latency, d_n, d_start, d_end);
     run_kernel_and_print(fma_latency_interleaved, d_n, d_start, d_end);
     run_kernel_and_print(fma_latency_no_interleave, d_n, d_start, d_end);
+    run_kernel_and_print(mem_latency, d_n, d_start, d_end);
 
     CUDA_CHECK(cudaDeviceSynchronize());
 
