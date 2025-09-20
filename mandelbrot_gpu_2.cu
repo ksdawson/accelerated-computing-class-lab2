@@ -23,13 +23,13 @@ uint32_t ceil_div(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 /// <--- your code here --->
 
 // Vector dimensions: 32x1, 16x2, 8x4, 4x8, 2x16, 1x32
-constexpr uint8_t vector_size = 32; // 32 wide GPU vector lanes
-constexpr uint8_t vector_width = 4; // Tuning parameter
-constexpr uint8_t vector_height = vector_size / vector_width;
+constexpr uint8_t VECTOR_SIZE = 32; // 32 wide GPU vector lanes
+constexpr uint8_t VECTOR_WIDTH = 4; // Tuning parameter
+constexpr uint8_t VECTOR_HEIGHT = VECTOR_SIZE / VECTOR_WIDTH;
 
 // ILP dimensions
-constexpr uint8_t ilp_single_warp_size = 4; // Tuning parameter
-constexpr uint8_t ilp_full_warp_size = 2; // Tuning parameter
+constexpr uint8_t ILP_SINGLE_WARP_SIZE = 4; // Tuning parameter
+constexpr uint8_t ILP_FULL_WARP_SIZE = 2; // Tuning parameter
 // TODO: Allow for custom ILP sizes?
 
 // Helper functions
@@ -39,7 +39,7 @@ __device__ void thread_strided_mandelbrot_gpu(
     uint32_t *out /* pointer to GPU memory */
 ) {
     // Dimensions needed for tiling
-    uint32_t num_vectors_per_row = img_size / vector_width;
+    uint32_t num_vectors_per_row = img_size / VECTOR_WIDTH;
 
     // Thread info
     int tot_threads = gridDim.x * blockDim.x;
@@ -48,16 +48,16 @@ __device__ void thread_strided_mandelbrot_gpu(
     // Flatten the 2D iteration space into 1D and stride tot_threads pixels each iteration
     for (uint64_t pixel_index = thread_index; pixel_index < img_size * img_size; pixel_index += tot_threads) {
         // Re-map the pixel index to tiles of vector height x vector width
-        uint32_t tile_index = pixel_index / vector_size;
-        uint32_t tile_offset = pixel_index % vector_size;
+        uint32_t tile_index = pixel_index / VECTOR_SIZE;
+        uint32_t tile_offset = pixel_index % VECTOR_SIZE;
         uint32_t tile_i = tile_index / num_vectors_per_row;
         uint32_t tile_j = tile_index % num_vectors_per_row;
 
         // Calculate 2D pixel coordinates from the flattened tile index
-        uint32_t vector_i = tile_offset / vector_width;
-        uint32_t vector_j = tile_offset % vector_width;
-        uint32_t i = tile_i * vector_height + vector_i;
-        uint32_t j = tile_j * vector_width + vector_j;
+        uint32_t vector_i = tile_offset / VECTOR_WIDTH;
+        uint32_t vector_j = tile_offset % VECTOR_WIDTH;
+        uint32_t i = tile_i * VECTOR_HEIGHT + vector_i;
+        uint32_t j = tile_j * VECTOR_WIDTH + vector_j;
 
         // Get the plane coordinates for the image pixel
         float cx = (float(j) / float(img_size)) * window_zoom + window_x;
@@ -92,7 +92,7 @@ __device__ void thread_strided_mandelbrot_gpu_ilp(
     uint32_t *out /* pointer to GPU memory */
 ) {
     // Dimensions needed for tiling
-    uint32_t num_vectors_per_row = img_size / vector_width;
+    uint32_t num_vectors_per_row = img_size / VECTOR_WIDTH;
 
     // Thread info
     int tot_threads = gridDim.x * blockDim.x;
@@ -114,15 +114,15 @@ __device__ void thread_strided_mandelbrot_gpu_ilp(
         float cy[ilp_size];
         for (uint8_t v = 0; v < ilp_size; ++v) {
             // Re-map the pixel index to tiles of vector height x vector width
-            uint32_t tile_index = (pixel_index + v) / vector_size;
-            uint32_t tile_offset = (pixel_index + v) % vector_size;
+            uint32_t tile_index = (pixel_index + v) / VECTOR_SIZE;
+            uint32_t tile_offset = (pixel_index + v) % VECTOR_SIZE;
             uint32_t tile_i = tile_index / num_vectors_per_row;
             uint32_t tile_j = tile_index % num_vectors_per_row;
             // Calculate 2D pixel coordinates from the flattened tile index
-            uint32_t vector_i = tile_offset / vector_width;
-            uint32_t vector_j = tile_offset % vector_width;
-            uint32_t i = tile_i * vector_height + vector_i;
-            uint32_t j = tile_j * vector_width + vector_j;
+            uint32_t vector_i = tile_offset / VECTOR_WIDTH;
+            uint32_t vector_j = tile_offset % VECTOR_WIDTH;
+            uint32_t i = tile_i * VECTOR_HEIGHT + vector_i;
+            uint32_t j = tile_j * VECTOR_WIDTH + vector_j;
             // Compute the plane coordinate for the image pixel in the ILP block
             cx[v] = (float(j) / float(img_size)) * window_zoom + window_x;
             cy[v] = (float(i) / float(img_size)) * window_zoom + window_y;
@@ -157,15 +157,15 @@ __device__ void thread_strided_mandelbrot_gpu_ilp(
         // Write result for all vectors
         for (uint8_t v = 0; v < ilp_size; ++v) {
             // Re-map the pixel index to tiles of vector height x vector width
-            uint32_t tile_index = (pixel_index + v) / vector_size;
-            uint32_t tile_offset = (pixel_index + v) % vector_size;
+            uint32_t tile_index = (pixel_index + v) / VECTOR_SIZE;
+            uint32_t tile_offset = (pixel_index + v) % VECTOR_SIZE;
             uint32_t tile_i = tile_index / num_vectors_per_row;
             uint32_t tile_j = tile_index % num_vectors_per_row;
             // Calculate 2D pixel coordinates from the flattened tile index
-            uint32_t vector_i = tile_offset / vector_width;
-            uint32_t vector_j = tile_offset % vector_width;
-            uint32_t i = tile_i * vector_height + vector_i;
-            uint32_t j = tile_j * vector_width + vector_j;
+            uint32_t vector_i = tile_offset / VECTOR_WIDTH;
+            uint32_t vector_j = tile_offset % VECTOR_WIDTH;
+            uint32_t i = tile_i * VECTOR_HEIGHT + vector_i;
+            uint32_t j = tile_j * VECTOR_WIDTH + vector_j;
             out[i * img_size + j] = iters[v];
         }
     }
@@ -206,7 +206,7 @@ __global__ void mandelbrot_gpu_vector_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    thread_strided_mandelbrot_gpu_ilp<ilp_single_warp_size>(img_size, max_iters, out);
+    thread_strided_mandelbrot_gpu_ilp<ILP_SINGLE_WARP_SIZE>(img_size, max_iters, out);
 }
 
 void launch_mandelbrot_gpu_vector_ilp(
@@ -282,7 +282,7 @@ __global__ void mandelbrot_gpu_vector_multicore_multithread_full_ilp(
     uint32_t max_iters,
     uint32_t *out /* pointer to GPU memory */
 ) {
-    thread_strided_mandelbrot_gpu_ilp<ilp_full_warp_size>(img_size, max_iters, out);
+    thread_strided_mandelbrot_gpu_ilp<ILP_FULL_WARP_SIZE>(img_size, max_iters, out);
 }
 
 void launch_mandelbrot_gpu_vector_multicore_multithread_full_ilp(
